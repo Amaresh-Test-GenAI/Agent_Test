@@ -1,32 +1,46 @@
+#!/usr/bin/env python3
+"""
+AWS Bedrock GenAI ETL Analysis Setup Script
+
+This script sets up a complete AWS Bedrock GenAI environment including:
+- OpenSearch Serverless collection and vector index
+- Knowledge Base with S3 data source
+- Bedrock Agent with ETL analysis capabilities
+- Code Interpreter action groups
+
+Author: GenAI Team
+Date: 2024
+"""
+
 import boto3
 import time
 import uuid
 import json
 from requests_aws4auth import AWS4Auth
 import requests
-import time
-import uuid
 import botocore.exceptions
 
 
-region = "us-east-1"
-collection_name = "test-genai-1"
-embedding_model_arn = "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v1"
-s3_bucket_arn = "arn:aws:s3:::genai-test-dg"
-s3_prefix = "test-kb/"
-agent_name = "Test-Agent_GENAI-3"
-# instruction = " You are a helpful assistant that answers questions using the knowledge base For questions about data transformations, respond with the source tables, target tables, and transformation logic in JSON format."
+# Configuration Constants
+REGION = "us-east-1"
+COLLECTION_NAME = "test-genai-1"
+EMBEDDING_MODEL_ARN = "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v1"
+S3_BUCKET_ARN = "arn:aws:s3:::genai-test-dg"
+S3_PREFIX = "test-kb/"
+AGENT_NAME = "Test-Agent_GENAI-3"
+ACCOUNT_ID = "406099943223"
+BEDROCK_ROLE_ARN = f"arn:aws:iam::{ACCOUNT_ID}:role/BedrockKBRole"
 
-
-aoss = boto3.client("opensearchserverless", region_name=region)
-bedrock = boto3.client("bedrock-agent", region_name=region)
-runtime = boto3.client("bedrock-agent-runtime", region_name=region)
-sts = boto3.client("sts", region_name=region)
-# account_id = sts.get_caller_identity()["Account"]
+# Initialize AWS clients
+aoss = boto3.client("opensearchserverless", region_name=REGION)
+bedrock = boto3.client("bedrock-agent", region_name=REGION)
+runtime = boto3.client("bedrock-agent-runtime", region_name=REGION)
+sts = boto3.client("sts", region_name=REGION)
 def ensure_opensearch_policies():
+    """Create OpenSearch Serverless security policies."""
     print("Ensuring OpenSearch Serverless security policies...")
 
-    
+    # Encryption policy
     try:
         aoss.create_security_policy(
             name="encryption-policy-genai",
@@ -40,7 +54,7 @@ def ensure_opensearch_policies():
     except aoss.exceptions.ConflictException:
         print("Encryption policy already exists.")
 
-    
+    # Network policy
     try:
         aoss.create_security_policy(
             name="network-policy-genai",
@@ -54,7 +68,7 @@ def ensure_opensearch_policies():
     except aoss.exceptions.ConflictException:
         print("Network policy already exists.")
 
-    
+    # Data access policy
     policy_name = "data-policy-test-genai-1"
     access_policy_document = [{
         "Rules": [
@@ -70,9 +84,9 @@ def ensure_opensearch_policies():
             }
         ],
         "Principal": [
-            "arn:aws:iam::406099943223:role/BedrockKBRole",
-            "arn:aws:iam::406099943223:role/BedrockKnowledgeBaseAccessRole",
-            "arn:aws:iam::406099943223:user/GenAI_Offshore_team_test"
+            f"arn:aws:iam::{ACCOUNT_ID}:role/BedrockKBRole",
+            f"arn:aws:iam::{ACCOUNT_ID}:role/BedrockKnowledgeBaseAccessRole",
+            f"arn:aws:iam::{ACCOUNT_ID}:user/GenAI_Offshore_team_test"
         ]
     }]
 
@@ -109,6 +123,7 @@ def ensure_opensearch_policies():
             print("Couldn't find existing policy to update.")
 
 def create_collection(name):
+    """Create OpenSearch Serverless collection and wait for it to become active."""
     print(f"Creating OpenSearch collection: {name}")
     try:
         aoss.create_collection(name=name, type="VECTORSEARCH")
@@ -127,15 +142,18 @@ def create_collection(name):
             time.sleep(10)
             continue
         break
+    
     create_vector_index(name, "genai-index")
     return collection_arn
 
 def create_vector_index(collection_name, index_name):
+    """Create vector index in OpenSearch collection."""
     print(f"Creating vector index: {index_name}")
     collections = aoss.list_collections()["collectionSummaries"]
     collection_arn = next((col["arn"] for col in collections if col["name"] == collection_name), None)
     if not collection_arn:
         raise Exception(f"Collection ARN not found for {collection_name}")
+    
     try:
         parts = collection_arn.split(":")
         region = parts[3]
@@ -181,7 +199,7 @@ def create_vector_index(collection_name, index_name):
         aws_auth = AWS4Auth(
             credentials.access_key,
             credentials.secret_key,
-            region,
+            REGION,
             "aoss",
             session_token=credentials.token
         )
@@ -196,16 +214,17 @@ def create_vector_index(collection_name, index_name):
         print(f"Exception during vector index creation: {e}")
 
 def create_knowledge_base(collection_arn):
+    """Create Bedrock Knowledge Base."""
     print("Creating Knowledge Base...")
     index_name = "genai-index"
     response = bedrock.create_knowledge_base(
         name=f"kb-{uuid.uuid4().hex[:6]}",
-        roleArn="arn:aws:iam::406099943223:role/BedrockKBRole",
+        roleArn=BEDROCK_ROLE_ARN,
         description="Auto-created KB",
         knowledgeBaseConfiguration={
             "type": "VECTOR",
             "vectorKnowledgeBaseConfiguration": {
-                "embeddingModelArn": embedding_model_arn
+                "embeddingModelArn": EMBEDDING_MODEL_ARN
             }
         },
         storageConfiguration={
@@ -226,6 +245,7 @@ def create_knowledge_base(collection_arn):
     return kb_id
 
 def wait_for_kb_active(kb_id):
+    """Wait for Knowledge Base to become active."""
     print("Waiting for Knowledge Base to become ACTIVE...")
     while True:
         response = bedrock.get_knowledge_base(knowledgeBaseId=kb_id)
@@ -239,6 +259,7 @@ def wait_for_kb_active(kb_id):
         time.sleep(5)
 
 def create_data_source(kb_id):
+    """Add S3 data source to Knowledge Base."""
     print("Adding S3 data source...")
     response = bedrock.create_data_source(
         knowledgeBaseId=kb_id,
@@ -246,8 +267,8 @@ def create_data_source(kb_id):
         dataSourceConfiguration={
             "type": "S3",
             "s3Configuration": {
-                "bucketArn": s3_bucket_arn,
-                "inclusionPrefixes": [s3_prefix]
+                "bucketArn": S3_BUCKET_ARN,
+                "inclusionPrefixes": [S3_PREFIX]
             }
         },
         vectorIngestionConfiguration={
@@ -264,13 +285,14 @@ def create_data_source(kb_id):
     print("Data source added:", data_source_id)
     return data_source_id
 def start_ingestion(kb_id, data_source_id):
-    print(" Starting ingestion...")
+    """Start ingestion job and wait for completion."""
+    print("Starting ingestion...")
     response = bedrock.start_ingestion_job(
         knowledgeBaseId=kb_id,
         dataSourceId=data_source_id
     )
     job_id = response["ingestionJob"]["ingestionJobId"]
-    print(" Ingestion job started:", job_id)
+    print("Ingestion job started:", job_id)
 
     while True:
         status = bedrock.get_ingestion_job(
@@ -279,32 +301,37 @@ def start_ingestion(kb_id, data_source_id):
             ingestionJobId=job_id
         )
         state = status["ingestionJob"]["status"]
-        print(" Ingestion status:", state)
+        print("Ingestion status:", state)
         if state in ["COMPLETE", "FAILED"]:
             break
         time.sleep(10)
 
     if state == "COMPLETE":
-        print(" Ingestion complete.")
-        print(" Checking for failure reasons (if any):")
-        print(status["ingestionJob"].get("failureReasons", []))
+        print("Ingestion complete.")
+        failure_reasons = status["ingestionJob"].get("failureReasons", [])
+        if failure_reasons:
+            print("Failure reasons found:")
+            for reason in failure_reasons:
+                print(f"  - {reason}")
+        else:
+            print("No failure reasons - ingestion was successful.")
         
-        
-        print(" Retrieving a few chunks from the knowledge base...")
-        runtime = boto3.client("bedrock-agent-runtime", region_name="us-east-1")
+        # Test retrieval
+        print("Retrieving a few chunks from the knowledge base...")
+        runtime_client = boto3.client("bedrock-agent-runtime", region_name=REGION)
 
         try:
-            retrieve_response = runtime.retrieve(
+            retrieve_response = runtime_client.retrieve(
                 knowledgeBaseId=kb_id,
                 retrievalQuery={"text": "What is this document about?"}
             )
             chunks = retrieve_response.get("retrievalResults", [])
-            print(f" Retrieved {len(chunks)} chunks.\n")
+            print(f"Retrieved {len(chunks)} chunks.\n")
 
             for i, chunk in enumerate(chunks[:5], 1):  
                 text = chunk.get("content", {}).get("text", "")[:300]
                 metadata = chunk.get("content", {}).get("metadata", {})
-                print(f" Chunk {i}:")
+                print(f"Chunk {i}:")
                 print(f"   Text: {text.strip()}")
                 print(f"   Metadata: {json.dumps(metadata, indent=2)}\n")
         except Exception as e:
@@ -318,8 +345,9 @@ def start_ingestion(kb_id, data_source_id):
 
 
 def enable_code_interpreter(agent_id):
+    """Enable Code Interpreter and User Input action groups."""
     print("Enabling Code Interpreter and User Input action groups...")
-    action_group_client = boto3.client("bedrock-agent", region_name="us-east-1")
+    action_group_client = boto3.client("bedrock-agent", region_name=REGION)
 
     def create_action_group(signature, name):
         try:
@@ -341,12 +369,12 @@ def enable_code_interpreter(agent_id):
     user_input_id = create_action_group("AMAZON.UserInput", "UserInputAction")
     code_interp_id = create_action_group("AMAZON.CodeInterpreter", "CodeInterpreterAction")
 
-    
+    # Wait for action groups to be enabled
     for ag_id, label in [(user_input_id, "UserInput"), (code_interp_id, "CodeInterpreter")]:
         if ag_id is None:
             continue
         status = ""
-        print(f" Waiting for {label} action group to be ENABLED...")
+        print(f"Waiting for {label} action group to be ENABLED...")
         while status != "ENABLED":
             response = action_group_client.get_agent_action_group(
                 agentId=agent_id,
@@ -377,8 +405,8 @@ import json
 bedrock = boto3.client("bedrock-agent")
 
 def create_agent(kb_id):
+    """Create Bedrock Agent with ETL analysis capabilities."""
     print("Creating agent...")
-    role_arn = "arn:aws:iam::406099943223:role/BedrockKBRole"
  
     raw_prompt = (
         "You are an intelligent ETL Analyst. Your task is to analyze a SQL stored procedure and extract all column-level transformations "
@@ -398,7 +426,7 @@ def create_agent(kb_id):
  
     response = bedrock.create_agent(
         agentName="genai-agent",
-        agentResourceRoleArn=role_arn,
+        agentResourceRoleArn=BEDROCK_ROLE_ARN,
         instruction=raw_prompt,  # Natural language for top-level instruction
         description="ETL Analyst Agent for parsing SQL stored procedures",
         foundationModel="arn:aws:bedrock:us-east-1:406099943223:inference-profile/us.meta.llama4-maverick-17b-instruct-v1:0",
@@ -590,7 +618,8 @@ def create_agent(kb_id):
 #     return agent_id, alias_id
 
 def wait_for_index_ready(collection_arn, index_name, timeout=120, interval=5):
-    print(f" Waiting for index '{index_name}' to become available...")
+    """Wait for vector index to become available."""
+    print(f"Waiting for index '{index_name}' to become available...")
 
     parts = collection_arn.split(":")
     region = parts[3]
@@ -628,6 +657,7 @@ def wait_for_index_ready(collection_arn, index_name, timeout=120, interval=5):
 
 
 def wait_for_alias_ready(agent_id, alias_id, timeout=600):
+    """Wait for agent alias to become ready."""
     print("Waiting for agent alias to become READY or PREPARED...")
     start_time = time.time()
     while True:
@@ -647,6 +677,7 @@ import time
 
 
 def wait_for_agent_status(bedrock_client, agent_id, expected_status, max_retries=60, interval=5):
+    """Wait for agent to reach expected status."""
     print(f"Waiting for agent {agent_id} to reach status: {expected_status}")
     
     for attempt in range(max_retries):
@@ -670,6 +701,7 @@ def wait_for_agent_status(bedrock_client, agent_id, expected_status, max_retries
 
 
 def attach_kb_to_agent(agent_id, kb_id):
+    """Link Knowledge Base to Agent (legacy function - kept for compatibility)."""
     print("Linking Knowledge Base to Agent...")
 
     bedrock.associate_agent_knowledge_base(
@@ -705,47 +737,96 @@ def attach_kb_to_agent(agent_id, kb_id):
 #     return full_response
 
 def invoke_agent(agent_id, alias_id, question):
-    import uuid
-    import boto3
-
+    """Invoke the agent with a question."""
     print(f"Asking agent: {question}")
     session_id = str(uuid.uuid4())
 
-    runtime = boto3.client("bedrock-agent-runtime", region_name="us-east-1")
+    runtime_client = boto3.client("bedrock-agent-runtime", region_name=REGION)
 
-    response = runtime.invoke_agent(
-        agentId=agent_id,
-        agentAliasId=alias_id,
-        sessionId=session_id,
-        inputText=question
-    )
+    try:
+        response = runtime_client.invoke_agent(
+            agentId=agent_id,
+            agentAliasId=alias_id,
+            sessionId=session_id,
+            inputText=question
+        )
+
+        print("Raw response:", response)
+
+        # Handle streaming response
+        if "completion" in response:
+            full_response = ""
+            for event in response["completion"]:
+                chunk = event.get("chunk", {}).get("bytes")
+                if chunk:
+                    full_response += chunk.decode()
+            print("\nAgent Response:\n")
+            print(full_response.strip())
+            return full_response.strip()
+
+        # Handle non-streaming response  
+        elif "completionResponse" in response:
+            output = response["completionResponse"].get("text", "")
+            print("\nAgent Response:\n")
+            print(output.strip())
+            return output.strip()
+
+        else:
+            print("⚠️ Unexpected structure in response:")
+            print(json.dumps(response, indent=2))
+            return ""
+
+    except botocore.exceptions.EventStreamError as e:
+        print("❌ Stream error:", str(e))
+        if hasattr(e, "error_response"):
+            print("Error details:")
+            print(json.dumps(e.error_response, indent=2))
+        return ""
+
+    except Exception as e:
+        print("❌ General error:", str(e))
+        return ""
 
 
-    full_response = ""
-    for event in response.get("completion", []):
-        chunk = event["chunk"]
-        full_response += chunk["bytes"].decode()
-
-   
-    print("Agent Response:\n")
-    print(full_response.strip())
-    print(" Done.")
-    return full_response.strip()
+def main():
+    """Main execution function."""
+    print("Starting AWS Bedrock GenAI setup...")
+    
+    try:
+        # Setup OpenSearch
+        ensure_opensearch_policies()
+        collection_arn = create_collection(COLLECTION_NAME)
+        wait_for_index_ready(collection_arn, "genai-index")
+        time.sleep(30)  # Additional wait for stability
+        
+        # Setup Knowledge Base
+        kb_id = create_knowledge_base(collection_arn)
+        wait_for_kb_active(kb_id)
+        data_source_id = create_data_source(kb_id)
+        start_ingestion(kb_id, data_source_id)
+        
+        # Setup Agent
+        agent_id, alias_id = create_agent(kb_id)
+        enable_code_interpreter(agent_id)
+        wait_for_alias_ready(agent_id, alias_id)
+        
+        # Test the agent
+        response = invoke_agent(agent_id, alias_id, "List the etl mappings for the target column")
+        
+        print("\n" + "="*50)
+        print("Setup completed successfully!")
+        print(f"Agent ID: {agent_id}")
+        print(f"Alias ID: {alias_id}")
+        print(f"Knowledge Base ID: {kb_id}")
+        print("="*50)
+        
+    except Exception as e:
+        print(f"❌ Setup failed: {str(e)}")
+        raise
 
 
 if __name__ == "__main__":
-    ensure_opensearch_policies()
-    collection_arn = create_collection(collection_name)
-    wait_for_index_ready(collection_arn, "genai-index")  
-    time.sleep(30)
-    kb_id = create_knowledge_base(collection_arn)
-    wait_for_kb_active(kb_id)
-    data_source_id = create_data_source(kb_id)
-    start_ingestion(kb_id, data_source_id)
-    agent_id, alias_id = create_agent(kb_id)
-    enable_code_interpreter(agent_id)
-    wait_for_alias_ready(agent_id, alias_id)
-    invoke_agent(agent_id, alias_id, "List the etl mappings for the target coloumn")
+    main()
 
 
 
